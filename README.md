@@ -66,23 +66,23 @@ The following commands are supported:
 
 ## Options
 
-  -h, --help            show this help message and exit
-  -v, --verbose         Be verbose
-  -o, --overwrite       Overwrite (for upload/download)
-  -c, --contents        Copy contents of the source directory, instead of the
-                        source directory itself.
-  -q, --quick           Copy only if file size is different.
-  -s, --stop-on-terminator
-                        Stop on terminator (b'\r\n>>> ')
-  -b BAUDRATE, --baudrate BAUDRATE
-                        Baud rate, default is 115200
-  -t TIMEOUT, --timeout TIMEOUT
-                        Timeout, default is 5. Any non-positive value means
-                        infinite.
-  -p PORT, --port PORT  Port to be used. Defaults to ESP_PORT environment
-                        variable.
-  --output OUTPUT       Output file. Messages received from MCU will be
-                        written here. For stdout, use '-'.
+	  -h, --help            show this help message and exit
+	  -v, --verbose         Be verbose
+	  -o, --overwrite       Overwrite (for upload/download)
+	  -c, --contents        Copy contents of the source directory, instead of the
+							source directory itself.
+	  -q, --quick           Copy only if file size is different.
+	  -s, --stop-on-terminator
+							Stop on terminator (b'\r\n>>> ')
+	  -b BAUDRATE, --baudrate BAUDRATE
+							Baud rate, default is 115200
+	  -t TIMEOUT, --timeout TIMEOUT
+							Timeout, default is 5. Any non-positive value means
+							infinite.
+	  -p PORT, --port PORT  Port to be used. Defaults to ESP_PORT environment
+							variable.
+	  --output OUTPUT       Output file. Messages received from MCU will be
+							written here. For stdout, use '-'.
 
 ## Commands
 
