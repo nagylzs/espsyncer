@@ -4,6 +4,7 @@ import serial
 import time
 import sys
 import os
+import io
 import select
 from enum import Enum
 from typing import Optional
@@ -34,15 +35,15 @@ class Commands(Enum):
     RESET = "reset"
     LS = "ls"
     LSL = "lsl"
-    RM = "rm"
     MKDIR = "mkdir"
     MAKEDIRS = "makedirs"
-    RMTREE = "rmtree"
     UPLOAD = "upload"
     DOWNLOAD = "download"
+    RM = "rm"
+    RMTREE = "rmtree"
     EXECUTE_FILE = "execute_file"
     EXECUTE = "execute"
-    LIVE_TEST_FILE = "live_test_file"
+    HOT_RELOAD = "hot_reload"
 
 
 VALID_COMMANDS = []
@@ -145,15 +146,14 @@ class EspSyncer:
     def exit_paste_mode(self):
         self.send(CTRL_D)
 
-    def communicate(self, stdin, stdout, sdtin_encoding=None, stdout_encoding=None,
+    def communicate(self, stdin, stdout, stdin_encoding=None, stdout_encoding=None,
                     absolute_timeout=None, timeout=1, paste_mode=True, watch_file_path=None,
-                    no_select=False):
+                    no_select=False, terminator=None):
         """Communicate with device. Connects stdin and stdout with the serial line of the device.
 
         :param stdin: Input file (file-like object)
         :param stdout: Output file (file-like ojbect)
-        :param sdtin_encoding: If the input file is not binary, then specify its encoding here
-        :param sdtin_encoding: If the input file is not binary, then specify its encoding here
+        :param stdin_encoding: If the input file is not binary, then specify its encoding here
         :param stdout_is_binary: If the output file is not binary, then specify its encoding here.
         :param absolute_timeout: Absolute timeout for communication.Effective ONLY when it is not None.
         :param timeout: Timeout between read/write operations. None means infinite.
@@ -164,6 +164,8 @@ class EspSyncer:
             for file changes of test scripts, and re-execute them on the MCU when they are changed.
         :param no_select: When this flag is set, the input file is read at once. When this flag is not set (default),
             the input file is read continuously when data is available (it is checked with select.select).
+        :param terminator: When given, it should be a binary string. This method will exist when it
+            encounters the given terminator in the MCU's serial output.
         """
         if paste_mode:
             self.enter_paste_mode()
@@ -178,6 +180,10 @@ class EspSyncer:
             last_changed = 0
         if no_select:
             sendbuf = stdin.read()
+            if stdin_encoding:
+                sendbuf = sendbuf.decode(stdin_encoding)
+            if not isinstance(sendbuf, bytes):
+                sendbuf = sendbuf.encode('utf-8')
             eof_reached = True
         while True:
             was_comm = False
@@ -189,8 +195,8 @@ class EspSyncer:
                     data = stdin.read()
                     if data:
                         was_comm = True
-                        if sdtin_encoding:
-                            data = data.decode(sdtin_encoding)
+                        if stdin_encoding:
+                            data = data.decode(stdin_encoding)
                         sendbuf += data
                     elif not sendbuf:
                         # select.select returns the file, but it reads as an empty string -> EOF reached.
@@ -210,12 +216,17 @@ class EspSyncer:
             # MCU -> stdout
             if self.ser.in_waiting:
                 data = self.ser.read(self.ser.in_waiting)
-                if stdout_encoding:
-                    stdout.write(data.decode(stdout_encoding))
-                else:
-                    stdout.write(data)
-                stdout.flush()
+                if stdout is not None:
+                    if stdout_encoding:
+                        stdout.write(data.decode(stdout_encoding))
+                    else:
+                        stdout.write(data)
+                    stdout.flush()
                 was_comm = True
+                # TODO: what if the terminator is slit between two reads?
+                if terminator is not None:
+                    if terminator in data:
+                        return False
 
             now = time.time()
             absolute_elapsed = now - started
@@ -242,13 +253,15 @@ class EspSyncer:
         cmd = cmd.encode('ascii')
         if not cmd.endswith(EOL):
             cmd += EOL
+        self.enter_paste_mode()
         self.send(cmd)
+        self.exit_paste_mode()
         result = self.recv(terminator)
         if expect_echo:
             assert result.startswith(cmd)
             result = result[len(cmd):]
         result = result.decode('ascii')
-        if result.startswith('Traceback (most recent call last):'):
+        if 'Traceback (most recent call last):' in result:
             raise EspException(result)
         return result
 
@@ -265,12 +278,16 @@ class EspSyncer:
         self.send(("for i in uos.ilistdir(%s):\r\n    print(i)\r\n" % repr(relpath)).encode("ascii"))
         self.exit_paste_mode()
         output = self.recv(DEFAULT_TERMINATOR)
-        TERM = b"print(i)\r\n=== \n\r\n"
+        TERM = b"print(i)\r\n=== \n"
         idx = output.find(TERM)
+        assert idx
         items = []
-        for line in output[idx + len(TERM):].split(b"\r\n"):
-            item = eval(line.strip())
-            items.append(item)
+        for lidx, line in enumerate(output[idx + len(TERM):].split(b"\r\n")):
+            if lidx == 0:
+                assert line == b''
+            else:
+                item = eval(line.strip())
+                items.append(item)
         return items
 
     def ls(self, relpath):
@@ -337,7 +354,7 @@ class EspSyncer:
             else:
                 raise e
 
-    def rmtree(self, relpath, ident=''):
+    def rmtree(self, relpath, ident='', isdir=None):
         """Delete all files and directories from the flash.
 
             To wipe out the complete fs: wipe("/")
@@ -352,21 +369,36 @@ class EspSyncer:
         if relpath != "/" and relpath.endswith("/"):
             relpath = relpath[:-1]
 
-        st = self.stat(relpath)
+        if isdir is None:
+            isdir = self.stat(relpath).isdir
 
-        if st.isfile:
+        if isdir:
+            items = self.ilistdir(relpath)
+            dnames, fnames = [], []
+            for item in items:
+                name, type = item[:2]
+                if type == ST_TYPE_FILE:
+                    fnames.append(name)
+                if type == ST_TYPE_DIRECTORY:
+                    dnames.append(name)
+            for dname in sorted(dnames):
+                if relpath == '/':
+                    self.rmtree('/' + dname, isdir=True)
+                else:
+                    self.rmtree(relpath + '/' + dname, isdir=True)
+            for fname in sorted(fnames):
+                if relpath == '/':
+                    fpath = '/' + fname
+                else:
+                    fpath = relpath + '/' + fname
+                self.logger("RM %s\n" % fpath)
+                self.rm(fpath)
+            if relpath != '/':
+                self.logger("RMDIR %s\n" % relpath)
+                self.rmdir(relpath)
+        else:
             self.logger(ident + "RM " + relpath + "\n")
             self.rm(relpath)
-        elif st.isdir:
-            for fname in sorted(self.ls(relpath)):
-                if relpath == '/':
-                    fpath = "/" + fname
-                else:
-                    fpath = relpath + "/" + fname
-                self.rmtree(fpath)
-            if relpath != "/":
-                self.logger(ident + "RMDIR " + relpath + "\n")
-                self.rmdir(relpath)
 
     def _upload_file(self, src, dst, overwrite, quick):
         """Internal method, to not use directly."""
@@ -484,38 +516,40 @@ class EspSyncer:
         self("del _fin", expect_echo=False)
         self.logger(' -- %.2f KB OK\n' % (total_read / 1024.0))
 
-    def _download(self, src, dst, overwrite, quick):
+    def _download(self, src, dst, overwrite, quick, isdir=None):
         fname = os.path.split(src)[1]
-        # Ez csak unix-on....
+        # Only on unix
         if dst == "/":
             dst_path = "/" + fname
         else:
             dst_path = os.path.join(dst, fname)
 
-        st = self.stat(src)
+        if isdir is None:
+            isdir = self.stat(src).isdir
 
-        if st.isdir:
+        if isdir:
             if not os.path.isfile(dst_path) and not os.path.isdir(dst_path):
                 self.logger("MKDIR " + dst_path + "\n")
                 os.mkdir(dst_path)
             elif os.path.isfile(dst_path):
                 raise Exception("upload: cannot overwrite a file with a directory: %s -> %s" % (src, dst))
 
-            for fname in sorted(self.ls(src)):
-                if fname not in [".", ".."]:
-                    if src == "/":
-                        src_path = "/" + fname
-                    else:
-                        src_path = src + "/" + fname
-                    self._download(src_path, dst_path, overwrite, quick)
+            items = self.ilistdir(src)
+            for item in items:
+                name, type = item[:2]
+                src_path = src + "/" + name
+                if type == ST_TYPE_FILE:
+                    self._download_file(src_path, dst_path + "/" + name, overwrite, quick)
+                else:
+                    self._download(src_path, dst_path, overwrite, quick, True)
         else:
             self._download_file(src, dst_path, overwrite, quick)
 
     def download(self, src, dst, contents, overwrite, quick):
         """Download files from device.
 
-        :param src: Source directory or file to be uploaded.
-        :param dst: Destination directory. It must exist!
+        :param src: Source (remote) directory or file to be downloaded.
+        :param dst: Destination (local) directory. It must exist!
         :param contents: Set flag to download the contents of the source dir, instead of the directory itself.
             When set, src must be a directory.
         :param overwrite: Set this flag if you want to automatically overwrite existing files.
@@ -573,7 +607,7 @@ class Main:
                 syncer.upload(params[0], params[1], self.args.contents, self.args.overwrite, self.args.quick)
             elif command == Commands.DOWNLOAD.value:
                 syncer.download(params[0], params[1], self.args.contents, self.args.overwrite, self.args.quick)
-            elif command in [Commands.EXECUTE_FILE.value, Commands.LIVE_TEST_FILE.value]:
+            elif command in [Commands.EXECUTE.value, Commands.EXECUTE_FILE.value, Commands.HOT_RELOAD.value]:
                 if args.output:
                     if args.output == "-":
                         fout = sys.stdout
@@ -585,24 +619,33 @@ class Main:
                     fout = None
                     stdout_encoding = None
                 if not params:
-                    raise SystemExit("execute_file takes a filename argument (or use '--' for stdin)")
+                    raise SystemExit("%s takes a filename argument (or use '-' for stdin)" % command)
                 watch_file_path = None
-                if params[0] == "-":
-                    fin = sys.stdin
-                    stdin_encoding = "utf-8"
-                    is_regular_file = False
-                    if command == Commands.LIVE_TEST_FILE.value:
-                        raise SystemExit("cannot live test stdin, it would not be possible to watch for changes")
-                else:
-                    fin = open(params[0], "rb")
+                if command == Commands.EXECUTE.value:
+                    fin = io.StringIO(params[0])
                     stdin_encoding = None
-                    is_regular_file = True
-                    if command == Commands.LIVE_TEST_FILE.value:
-                        watch_file_path = params[0]
+                    no_select = True
+                else:
+                    if params[0] == "-":
+                        fin = sys.stdin
+                        stdin_encoding = "utf-8"
+                        no_select = False
+                        if command == Commands.HOT_RELOAD.value:
+                            raise SystemExit("cannot hot_reload stdin, it would not be possible to watch for changes")
+                    else:
+                        fin = open(params[0], "rb")
+                        stdin_encoding = None
+                        no_select = True
+                        if command == Commands.HOT_RELOAD.value:
+                            watch_file_path = params[0]
+                if args.stop_on_terminator:
+                    terminator = DEFAULT_TERMINATOR
+                else:
+                    terminator = None
                 while True:
                     rerun = syncer.communicate(fin, fout, stdin_encoding, stdout_encoding,
-                                               watch_file_path=watch_file_path, no_select=is_regular_file,
-                                               timeout=args.timeout)
+                                               watch_file_path=watch_file_path, no_select=no_select,
+                                               timeout=args.timeout, terminator=terminator)
                     if rerun:
                         fin.close()
                         fin = open(params[0], "rb")
@@ -610,11 +653,6 @@ class Main:
                     else:
                         break
 
-            elif command == Commands.EXECUTE.value:
-                self.log(params[0])
-                syncer(params[0], expect_echo=False)
-            #elif command == Commands.COMMUNICATE.value:
-            #    syncer.communicate(stdin=sys.stdin, stdout=sys.stdout)
             else:
                 parser.error("Invalid command: %s" % command)
 
@@ -634,6 +672,8 @@ if __name__ == "__main__":
                         help="Copy contents of the source directory, instead of the source directory itself.")
     parser.add_argument("-q", "--quick", dest='quick', action="store_true", default=False,
                         help="Copy only if file size is different.")
+    parser.add_argument("-s", "--stop-on-terminator", dest='stop_on_terminator', default=False, action="store_true",
+                        help="Stop on terminator (%s)" % DEFAULT_TERMINATOR)
 
     parser.add_argument("-b", "--baudrate", dest='baudrate', type=int, default=DEFAULT_BAUD_RATE,
                         help="Baud rate, default is %s" % DEFAULT_BAUD_RATE)
@@ -646,8 +686,7 @@ if __name__ == "__main__":
                         help="Output file. Messages received from MCU will be written here. For stdout, use '-'.")
 
     parser.add_argument(dest='command', default=None,
-                        help="Command to be executed. Valid commands are:  " + "\n    ".join(VALID_COMMANDS) +
-                             " For reading data from stdin, use execute_file -")
+                        help="Command to be executed. Valid commands are:  " + "\n    ".join(VALID_COMMANDS))
     parser.add_argument(dest='params', default=[], nargs='*')
 
     args = parser.parse_args()
