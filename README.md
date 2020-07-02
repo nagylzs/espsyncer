@@ -101,22 +101,18 @@ Usage:
 
 	espsyncer.py reset
 	
-What it does:
-
-	Resets the device by setting DTR and RTS, wait 500msec and then clearing RTS.
-	Finally it waits for the MicroPython prompt ">>>" to appear on the serial line.
+What it does: Resets the device by setting DTR and RTS, wait 500msec and then clearing RTS. Finally it waits for the MicroPython prompt ">>>" to appear on the serial line.
 	
-Caveats:
+Caveats: This command will fail if ">>>" does not appear on the serial line after the reset.
 
-	This command will fail if ">>>" does not appear on the serial line after the reset.
-	Some reasons why it can happen:
+Some reasons why it can happen:
 	
-	* Faulty serial connection
-	* Wrong port number or baudrate is selected	
-	* MicroPython is not installed on the device
-	* MicroPython is installed on the device, but serial communication is disabled or does not work
-	* MicroPython is installed on the device, but it has a boot.py or main.py file that
-	  takes control of the MCU and preventing it from displaying the REPL prompt.
+* Faulty serial connection
+* Wrong port number or baudrate is selected	
+* MicroPython is not installed on the device
+* MicroPython is installed on the device, but serial communication is disabled or does not work
+* MicroPython is installed on the device, but it has a boot.py or main.py file that
+  takes control of the MCU and preventing it from displaying the REPL prompt.
 
 When there is no response from the device, then you should check your port number, baud rate and MicroPython formware with a terminal program such as RealTerm or putty.
 
