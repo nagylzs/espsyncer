@@ -43,7 +43,7 @@ the "cross bjt" circuit found on those boards, but it also works with that.)
 
 ## Command line parameters
 
-	espsyncer.py [-h] [-v] [-o] [-c] [-q] [-b BAUDRATE] [-t TIMEOUT]
+	espsyncer.py [-h] [-v] [-o] [-c] [-q] [-s] [-b BAUDRATE] [-t TIMEOUT]
 				 [-p PORT] [--output OUTPUT]
 				 command [params [params ...]]
 
